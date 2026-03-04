@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 
@@ -435,6 +436,66 @@ var _ = Describe("discordRPC", func() {
 			})
 			Expect(err).ToNot(HaveOccurred())
 		})
+
+		It("truncates long text fields and omits long URLs", func() {
+			host.CacheMock.On("GetString", discordImageKey).Return("mp:cached/art", true, nil).Once()
+			host.CacheMock.On("GetString", discordImageKey).Return("mp:cached/logo", true, nil).Once()
+
+			longName := strings.Repeat("N", 200)
+			longTitle := strings.Repeat("T", 200)
+			longArtist := strings.Repeat("A", 200)
+			longAlbum := strings.Repeat("B", 200)
+			longURL := "https://example.com/" + strings.Repeat("x", 237)
+
+			truncatedName := strings.Repeat("N", 127) + "…"
+			truncatedTitle := strings.Repeat("T", 127) + "…"
+			truncatedArtist := strings.Repeat("A", 127) + "…"
+			truncatedAlbum := strings.Repeat("B", 127) + "…"
+
+			host.WebSocketMock.On("SendText", "testuser", mock.MatchedBy(func(msg string) bool {
+				var message struct {
+					D json.RawMessage `json:"d"`
+				}
+				if err := json.Unmarshal([]byte(msg), &message); err != nil {
+					return false
+				}
+				var presence presencePayload
+				if err := json.Unmarshal(message.D, &presence); err != nil {
+					return false
+				}
+				if len(presence.Activities) != 1 {
+					return false
+				}
+				act := presence.Activities[0]
+				return act.Name == truncatedName &&
+					act.Details == truncatedTitle &&
+					act.State == truncatedArtist &&
+					act.Assets.LargeText == truncatedAlbum &&
+					act.DetailsURL == "" &&
+					act.StateURL == "" &&
+					act.Assets.LargeURL == "" &&
+					act.Assets.SmallURL == ""
+			})).Return(nil)
+
+			err := r.sendActivity("client123", "testuser", "token123", activity{
+				Application: "client123",
+				Name:        longName,
+				Type:        2,
+				Details:     longTitle,
+				DetailsURL:  longURL,
+				State:       longArtist,
+				StateURL:    longURL,
+				Assets: activityAssets{
+					LargeImage: "https://example.com/art.jpg",
+					LargeText:  longAlbum,
+					LargeURL:   longURL,
+					SmallImage: navidromeLogoURL,
+					SmallText:  "Navidrome",
+					SmallURL:   longURL,
+				},
+			})
+			Expect(err).ToNot(HaveOccurred())
+		})
 	})
 
 	Describe("clearActivity", func() {
@@ -446,6 +507,57 @@ var _ = Describe("discordRPC", func() {
 
 			err := r.clearActivity("testuser")
 			Expect(err).ToNot(HaveOccurred())
+		})
+	})
+
+	Describe("truncateText", func() {
+		It("returns short strings unchanged", func() {
+			Expect(truncateText("hello")).To(Equal("hello"))
+		})
+
+		It("returns exactly 128-char strings unchanged", func() {
+			s := strings.Repeat("a", 128)
+			Expect(truncateText(s)).To(Equal(s))
+		})
+
+		It("truncates strings over 128 chars to 127 + ellipsis", func() {
+			s := strings.Repeat("a", 200)
+			result := truncateText(s)
+			Expect([]rune(result)).To(HaveLen(128))
+			Expect(result).To(HaveSuffix("…"))
+		})
+
+		It("handles multi-byte characters correctly", func() {
+			// 130 Japanese characters — each is one rune but 3 bytes
+			s := strings.Repeat("あ", 130)
+			result := truncateText(s)
+			runes := []rune(result)
+			Expect(runes).To(HaveLen(128))
+			Expect(string(runes[127])).To(Equal("…"))
+		})
+
+		It("returns empty string unchanged", func() {
+			Expect(truncateText("")).To(Equal(""))
+		})
+	})
+
+	Describe("truncateURL", func() {
+		It("returns short URLs unchanged", func() {
+			Expect(truncateURL("https://example.com")).To(Equal("https://example.com"))
+		})
+
+		It("returns exactly 256-char URLs unchanged", func() {
+			u := "https://example.com/" + strings.Repeat("a", 236)
+			Expect(truncateURL(u)).To(Equal(u))
+		})
+
+		It("returns empty string for URLs over 256 chars", func() {
+			u := "https://example.com/" + strings.Repeat("a", 237)
+			Expect(truncateURL(u)).To(Equal(""))
+		})
+
+		It("returns empty string unchanged", func() {
+			Expect(truncateURL("")).To(Equal(""))
 		})
 	})
 })
